@@ -11,6 +11,7 @@
 import os
 import cv2
 import json
+import json_fix
 import sys
 import time
 import serial
@@ -30,20 +31,19 @@ if common_dir_path not in sys.path:
     sys.path.append(common_dir_path)
 
 # --- RADAR PARSER FALLBACKS ---
-#try:
-
-from parseFrame import *
-from gui_parser import *
-# except ImportError:
-#     class UARTParser:
-#         def __init__(self, type): self.dataCom = None
-#         def readAndParseUartDoubleCOMPort(self): return {"pointCloud": np.array([]), "numDetectedTracks": 0}
+try:
+    from parseFrame import *
+    from gui_parser import *
+except ImportError:
+    class UARTParser:
+        def __init__(self, type): self.dataCom = None
+        def readAndParseUartDoubleCOMPort(self): return {"pointCloud": np.array([]), "numDetectedTracks": 0}
 
 class RadarDataCollectorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Radar & Video Sync Dataset Collector")
-        self.root.geometry("560x780")
+        self.root.geometry("560x820")
         
         self.stop_event = threading.Event()
         self.radar_data = []
@@ -58,7 +58,10 @@ class RadarDataCollectorGUI:
         self.frame_idx = 0
         self.max_duration = 0
         self.activity_slug = ""
+        
+        # Persistent Subject Folder Parameters
         self.person_id = ""
+        self.person_dir = ""
         
         # Paths for current run
         self.video_output_path = ""
@@ -85,6 +88,7 @@ class RadarDataCollectorGUI:
         }
         
         self.setup_ui()
+        self.initialize_person() 
         
     def setup_ui(self):
         style = ttk.Style()
@@ -138,6 +142,13 @@ class RadarDataCollectorGUI:
         self.spin_weight.set(70)
         self.spin_weight.grid(row=2, column=1, padx=5, sticky="w")
 
+        ttk.Label(lbl_frame_sub, text="Active Subject ID:").grid(row=3, column=0, sticky="w", pady=8)
+        self.lbl_current_person = ttk.Label(lbl_frame_sub, text="Scanning...", font=("Helvetica", 10, "bold"), foreground="green")
+        self.lbl_current_person.grid(row=3, column=1, padx=5, sticky="w")
+        
+        self.btn_new_person = ttk.Button(lbl_frame_sub, text="🆕 Next Person", command=self.manual_next_person)
+        self.btn_new_person.grid(row=3, column=2, padx=5, sticky="w")
+
         # 4. Task Parameters
         lbl_frame_task = ttk.LabelFrame(self.root, text=" 4. Task Parameters ", padding=10)
         lbl_frame_task.pack(fill="x", padx=15, pady=5)
@@ -181,6 +192,31 @@ class RadarDataCollectorGUI:
         if selected:
             self.entry_root_dir.delete(0, tk.END)
             self.entry_root_dir.insert(0, selected)
+            self.person_dir, self.person_id = self.get_next_person_dir(selected)
+            self.lbl_current_person.config(text=self.person_id)
+
+    def initialize_person(self):
+        base_dir = self.entry_root_dir.get()
+        self.person_dir, self.person_id = self.get_next_person_dir(base_dir)
+        self.lbl_current_person.config(text=self.person_id)
+
+    def manual_next_person(self):
+        base_dir = self.entry_root_dir.get()
+        i = 1
+        while True:
+            candidate_path = os.path.join(base_dir, f"person{i}")
+            if not os.path.exists(candidate_path):
+                os.makedirs(candidate_path)
+                self.person_dir = candidate_path
+                self.person_id = f"person{i}"
+                break
+            elif len(os.listdir(candidate_path)) == 0:
+                self.person_dir = candidate_path
+                self.person_id = f"person{i}"
+                break
+            i += 1
+        self.lbl_current_person.config(text=self.person_id)
+        messagebox.showinfo("Subject Advanced", f"Switched to a clean execution environment slot: {self.person_id}")
 
     def get_next_person_dir(self, root_dir):
         if not os.path.exists(root_dir):
@@ -205,7 +241,6 @@ class RadarDataCollectorGUI:
             run_idx += 1
 
     def record_radar_loop(self, port, is_simulated):
-        """Radar read thread remains asynchronous because it does not touch the window GUI system."""
         try:
             if is_simulated:
                 while not self.stop_event.is_set():
@@ -241,15 +276,14 @@ class RadarDataCollectorGUI:
                         pc_raw = ti_output.get('pointCloud', np.array([]))
                         if isinstance(pc_raw, np.ndarray) and pc_raw.size > 0:
                             pc_x, pc_y, pc_z, pc_doppler, pc_snr = pc_raw[:, 0:5].T.tolist()
+                            reconstructed_pc = np.column_stack((pc_x, pc_y, pc_z, pc_doppler, pc_snr)).tolist()
                         else:
-                            pc_x = pc_y = pc_z = pc_doppler = pc_snr = []
+                            reconstructed_pc = []
 
                         def clean_nested_structures(val):
                             if isinstance(val, np.ndarray):
                                 return val.tolist()
                             return val if val is not None else []
-                        
-                        reconstructed_pc = np.column_stack((pc_x, pc_y, pc_z, pc_doppler, pc_snr))
 
                         formatted_packet = {
                             "time": now_iso,
@@ -260,7 +294,6 @@ class RadarDataCollectorGUI:
                             "heightData": clean_nested_structures(ti_output.get('heightData')),
                             "trackIndexes": clean_nested_structures(ti_output.get('trackIndexes')),
                             "pointCloud": reconstructed_pc,
-                         
                         }
                         self.radar_data.append(formatted_packet)
         except Exception as e:
@@ -273,6 +306,7 @@ class RadarDataCollectorGUI:
     def start_pipeline_countdown(self):
         self.btn_start.config(state="disabled")
         self.btn_stop.config(state="disabled")
+        self.btn_new_person.config(state="disabled") 
         
         initial_delay = int(self.combo_delay.get())
         self.run_countdown_step(initial_delay)
@@ -298,31 +332,57 @@ class RadarDataCollectorGUI:
         age, height, weight = self.spin_age.get(), self.spin_height.get(), self.spin_weight.get()
         self.activity_slug = self.activity_map[self.combo_activity.get()]
         
-        person_dir, self.person_id = self.get_next_person_dir(base_dir)
+        if not self.person_id or not self.person_dir:
+            self.person_dir, self.person_id = self.get_next_person_dir(base_dir)
         
-        json_meta_path = os.path.join(person_dir, f"{self.person_id}.json")
+        self.lbl_current_person.config(text=self.person_id)
+        
+        json_meta_path = os.path.join(self.person_dir, f"{self.person_id}.json")
         if not os.path.exists(json_meta_path):
             meta_payload = {"subject_id": self.person_id, "age_years": int(age), "height_cm": int(height), "weight_kg": int(weight)}
             with open(json_meta_path, 'w') as f:
                 json.dump(meta_payload, f, indent=4)
 
-        run_idx = self.calculate_next_run_idx(person_dir, self.activity_slug)
+        run_idx = self.calculate_next_run_idx(self.person_dir, self.activity_slug)
         
-        self.video_output_path = os.path.join(person_dir, f"{self.activity_slug}_{run_idx:02d}_camera.mp4")
-        self.radar_output_path = os.path.join(person_dir, f"{self.activity_slug}_{run_idx:02d}_radar.json")
-        self.sync_output_path = os.path.join(person_dir, f"{self.activity_slug}_{run_idx:02d}_sync.csv")
+        self.video_output_path = os.path.join(self.person_dir, f"{self.activity_slug}_{run_idx:02d}_camera.mp4")
+        self.radar_output_path = os.path.join(self.person_dir, f"{self.activity_slug}_{run_idx:02d}_radar.json")
+        self.sync_output_path = os.path.join(self.person_dir, f"{self.activity_slug}_{run_idx:02d}_sync.csv")
 
         if not is_sim:
             self.cap = cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_ANY)
             if not self.cap.isOpened():
                 self.lbl_status.config(text="❌ Error: Camera Initialisation Failed", foreground="red")
                 self.btn_start.config(state="normal")
+                self.btn_new_person.config(state="normal")
                 return
-            width, height_frame = int(self.cap.get(3)), int(self.cap.get(4))
+            
+            # =================================================================
+            # 🚀 YOLOv8 POSE HARWARE CONFIGURATION OPTIMIZATIONS
+            # =================================================================
+            # Use MJPEG stream container pipeline (unlocks fast buffer access)
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            
+            # Request 1280x720 (Perfect aspect ratio matrix context for YOLOv8)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            
+            # Request a stable 30 FPS hardware stream boundary
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+
+            # Standardize color matrices (Linear profile blocks ghost silhouettes)
+            self.cap.set(cv2.CAP_PROP_BRIGHTNESS, 128)  # Midpoint baseline
+            self.cap.set(cv2.CAP_PROP_CONTRAST, 128)    # Midpoint baseline (keeps shadow details)
+            self.cap.set(cv2.CAP_PROP_SHARPNESS, 180)   # Boosts body/limb edge contours
+
+            # Read negotiated parameters assigned back by your Windows camera driver
+            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height_frame = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         else:
             self.cap = None
             width, height_frame = 640, 480
 
+        # Note: The video writer safely saves frames at 20.0 FPS, matching your script's Tkinter cadence loop perfectly!
         self.video_writer = cv2.VideoWriter(self.video_output_path, cv2.VideoWriter_fourcc(*'mp4v'), 20.0, (width, height_frame))
         
         self.radar_data.clear()
@@ -339,14 +399,12 @@ class RadarDataCollectorGUI:
         self.recording_start_time = time.time()
         self.frame_idx = 0
         
-        # Start the non-blocking execution cycle loop on the main thread
         self.record_frame_cycle()
 
     def record_frame_cycle(self):
         if not self.is_recording:
             return
 
-        # Check for time-based completion bounds
         if (time.time() - self.recording_start_time) >= self.max_duration:
             self.finalize_and_save_data()
             return
@@ -370,8 +428,8 @@ class RadarDataCollectorGUI:
         
         if self.radar_data:
             last_pkt = self.radar_data[-1]
-            pts = last_pkt.get("num_detected_pts", 0)
-            trks = last_pkt.get("num_detected_tracks", 0)
+            pts = last_pkt.get("numDetectedPoints", 0)
+            trks = last_pkt.get("numDetectedTracks", 0)
             cv2.putText(frame, f"Pts: {pts} | Tracks: {trks}", (15, 90), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
@@ -381,13 +439,10 @@ class RadarDataCollectorGUI:
         cv2.putText(frame, f"Activity: {self.activity_slug}", (15, 60), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         
-        # Safe on Mac because this function executes entirely on the Main Thread loop
         cv2.imshow("Live Telemetry Sync Frame Target", frame)
         cv2.waitKey(1)
         
         self.frame_idx += 1
-        
-        # Request next execution frame step in ~45-50ms (Targets roughly 20-22 FPS cadence bounds)
         self.root.after(45, self.record_frame_cycle)
 
     def finalize_and_save_data(self):
@@ -409,9 +464,11 @@ class RadarDataCollectorGUI:
             
         pd.DataFrame(self.video_sync).to_csv(self.sync_output_path, index=False)
         
-        self.lbl_status.config(text=f"✅ Saved output run files successfully inside {self.person_id} structure!", foreground="green")
-        messagebox.showinfo("Pipeline Complete", f"Data records safely committed to directory slot:\n{self.person_id}")
+        self.lbl_status.config(text=f"✅ Saved run successfully inside {self.person_id} structural block!", foreground="green")
+        messagebox.showinfo("Pipeline Complete", f"Data records safely saved under the persistent ID slot:\n{self.person_id}")
+        
         self.btn_start.config(state="normal")
+        self.btn_new_person.config(state="normal") 
 
 if __name__ == "__main__":
     root = tk.Tk()
