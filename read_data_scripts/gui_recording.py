@@ -29,6 +29,21 @@ class RadarDataCollectorGUI:
         self.video_sync = []
         self.is_recording = False
         
+        # Hardware tracking variables
+        self.cap = None
+        self.video_writer = None
+        self.radar_thread = None
+        self.recording_start_time = 0
+        self.frame_idx = 0
+        self.max_duration = 0
+        self.activity_slug = ""
+        self.person_id = ""
+        
+        # Paths for current run
+        self.video_output_path = ""
+        self.radar_output_path = ""
+        self.sync_output_path = ""
+        
         self.activity_map = {
             "Walking": "walking",
             "Sitting down watching TV": "sit_tv",
@@ -125,7 +140,7 @@ class RadarDataCollectorGUI:
         self.lbl_status = ttk.Label(self.root, text="System Ready", font=("Helvetica", 11, "bold"), foreground="blue")
         self.lbl_status.pack(pady=10)
         
-        self.btn_start = tk.Button(self.root, text="🚀 START EXPERIMENT PIPELINE", bg="#4CAF50", fg="white", font=("Helvetica", 11, "bold"), command=self.launch_recording_thread)
+        self.btn_start = tk.Button(self.root, text="🚀 START EXPERIMENT PIPELINE", bg="#4CAF50", fg="white", font=("Helvetica", 11, "bold"), command=self.start_pipeline_countdown)
         self.btn_start.pack(fill="x", padx=25, pady=3, ipady=6)
         
         self.btn_stop = tk.Button(self.root, text="🛑 STOP EARLY & SAVE", bg="#F44336", fg="white", font=("Helvetica", 11, "bold"), state="disabled", command=self.stop_early)
@@ -169,6 +184,7 @@ class RadarDataCollectorGUI:
             run_idx += 1
 
     def record_radar_loop(self, port, is_simulated):
+        """Radar read thread remains asynchronous because it does not touch the window GUI system."""
         try:
             if is_simulated:
                 while not self.stop_event.is_set():
@@ -201,7 +217,6 @@ class RadarDataCollectorGUI:
                         now_time = time.time()
                         now_iso = datetime.datetime.utcnow().isoformat()
 
-                        # Extract Point Cloud arrays safely
                         pc_raw = ti_output.get('pointCloud', np.array([]))
                         if isinstance(pc_raw, np.ndarray) and pc_raw.size > 0:
                             pc_x, pc_y, pc_z, pc_doppler, pc_snr = pc_raw[:, 0:5].T.tolist()
@@ -213,7 +228,6 @@ class RadarDataCollectorGUI:
                                 return val.tolist()
                             return val if val is not None else []
 
-                        # PACKET CAPTURED REGARDLESS OF TRACK COUNT
                         formatted_packet = {
                             "time": now_iso,
                             "unix_ts": now_time,  
@@ -234,125 +248,150 @@ class RadarDataCollectorGUI:
 
     def stop_early(self):
         if self.is_recording:
-            self.is_recording = False
+            self.finalize_and_save_data()
 
-    def launch_recording_thread(self):
+    def start_pipeline_countdown(self):
         self.btn_start.config(state="disabled")
-        self.btn_stop.config(state="normal")
-        threading.Thread(target=self.run_experiment_pipeline, daemon=True).start()
+        self.btn_stop.config(state="disabled")
+        
+        initial_delay = int(self.combo_delay.get())
+        self.run_countdown_step(initial_delay)
 
-    def run_experiment_pipeline(self):
+    def run_countdown_step(self, count):
+        if count > 0:
+            self.lbl_status.config(text=f"⚠️ GET READY! Recording starts in {count}s...", foreground="orange")
+            self.root.after(1000, lambda: self.run_countdown_step(count - 1))
+        else:
+            self.initialize_hardware_recording()
+
+    def initialize_hardware_recording(self):
         base_dir = self.entry_root_dir.get()
         com_port = self.entry_com.get()
         is_sim = self.var_sim_mode.get()
-        initial_delay = int(self.combo_delay.get())
-        rec_duration = int(self.spin_duration.get())
+        self.max_duration = int(self.spin_duration.get())
         
         try:
             cam_idx = int(self.combo_cam.get().split()[0])
         except ValueError:
             cam_idx = 0
-        
+            
         age, height, weight = self.spin_age.get(), self.spin_height.get(), self.spin_weight.get()
-        activity_slug = self.activity_map[self.combo_activity.get()]
+        self.activity_slug = self.activity_map[self.combo_activity.get()]
         
-        person_dir, person_id = self.get_next_person_dir(base_dir)
+        person_dir, self.person_id = self.get_next_person_dir(base_dir)
         
-        json_meta_path = os.path.join(person_dir, f"{person_id}.json")
+        json_meta_path = os.path.join(person_dir, f"{self.person_id}.json")
         if not os.path.exists(json_meta_path):
-            meta_payload = {"subject_id": person_id, "age_years": int(age), "height_cm": int(height), "weight_kg": int(weight)}
+            meta_payload = {"subject_id": self.person_id, "age_years": int(age), "height_cm": int(height), "weight_kg": int(weight)}
             with open(json_meta_path, 'w') as f:
                 json.dump(meta_payload, f, indent=4)
 
-        run_idx = self.calculate_next_run_idx(person_dir, activity_slug)
+        run_idx = self.calculate_next_run_idx(person_dir, self.activity_slug)
         
-        video_output_path = os.path.join(person_dir, f"{activity_slug}_{run_idx:02d}_camera.mp4")
-        radar_output_path = os.path.join(person_dir, f"{activity_slug}_{run_idx:02d}_radar.json")
-        sync_output_path = os.path.join(person_dir, f"{activity_slug}_{run_idx:02d}_sync.csv")
-
-        for countdown in range(initial_delay, 0, -1):
-            self.lbl_status.config(text=f"⚠️ GET READY! Recording starts in {countdown}s...", foreground="orange")
-            time.sleep(1)
+        self.video_output_path = os.path.join(person_dir, f"{self.activity_slug}_{run_idx:02d}_camera.mp4")
+        self.radar_output_path = os.path.join(person_dir, f"{self.activity_slug}_{run_idx:02d}_radar.json")
+        self.sync_output_path = os.path.join(person_dir, f"{self.activity_slug}_{run_idx:02d}_sync.csv")
 
         if not is_sim:
-            cap = cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_ANY)
-            if not cap.isOpened():
-                self.lbl_status.config(text="❌ Error: Physical Camera Initialisation Failed", foreground="red")
+            self.cap = cv2.VideoCapture(cam_idx, cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_ANY)
+            if not self.cap.isOpened():
+                self.lbl_status.config(text="❌ Error: Camera Initialisation Failed", foreground="red")
                 self.btn_start.config(state="normal")
-                self.btn_stop.config(state="disabled")
                 return
-            width, height_frame = int(cap.get(3)), int(cap.get(4))
+            width, height_frame = int(self.cap.get(3)), int(self.cap.get(4))
         else:
-            cap = None
+            self.cap = None
             width, height_frame = 640, 480
 
-        out = cv2.VideoWriter(video_output_path, cv2.VideoWriter_fourcc(*'mp4v'), 20.0, (width, height_frame))
+        self.video_writer = cv2.VideoWriter(self.video_output_path, cv2.VideoWriter_fourcc(*'mp4v'), 20.0, (width, height_frame))
         
         self.radar_data.clear()
         self.video_sync.clear()
         self.stop_event.clear()
         
-        radar_thread = threading.Thread(target=self.record_radar_loop, args=(com_port, is_sim), daemon=True)
-        radar_thread.start()
+        self.radar_thread = threading.Thread(target=self.record_radar_loop, args=(com_port, is_sim), daemon=True)
+        self.radar_thread.start()
         
-        self.lbl_status.config(text="🔴 RECORDING ACTIVE... CLK STOP BUTTON ON THE GUI TO END", foreground="red")
+        self.lbl_status.config(text="🔴 RECORDING ACTIVE... CLICK STOP BUTTON ON THE GUI TO END", foreground="red")
+        self.btn_stop.config(state="normal")
+        
         self.is_recording = True
+        self.recording_start_time = time.time()
+        self.frame_idx = 0
         
-        start_time = time.time()
-        frame_idx = 0
-        
-        while self.is_recording and ((time.time() - start_time) < rec_duration):
-            if is_sim:
-                frame = np.zeros((height_frame, width, 3), dtype=np.uint8)
-                time.sleep(0.05)
-                ret = True
-            else:
-                ret, frame = cap.read()
-                
-            if not ret:
-                break
-                
-            now_time = time.time()
-            ts = datetime.datetime.fromtimestamp(now_time).isoformat(timespec='microseconds')
-            
-            out.write(frame)
-            self.video_sync.append({"frame": frame_idx, "sys_ts": ts, "unix_ts": now_time})
-            
-            if self.radar_data:
-                last_pkt = self.radar_data[-1]
-                pts = last_pkt.get("num_detected_pts", 0)
-                trks = last_pkt.get("num_detected_tracks", 0)
-                cv2.putText(frame, f"Pts: {pts} | Tracks: {trks}", (15, 90), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        # Start the non-blocking execution cycle loop on the main thread
+        self.record_frame_cycle()
 
-            mode_prefix = "[SIMULATION]" if is_sim else "[LIVE]"
-            cv2.putText(frame, f"{mode_prefix} Frame: {frame_idx} | {ts.split('T')[1]}", (15, 30), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-            cv2.putText(frame, f"Activity: {activity_slug}", (15, 60), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            
-            cv2.imshow("Live Telemetry Sync Frame Target", frame)
-            frame_idx += 1
-            cv2.waitKey(1)
-                
-        # --- Clean Pipeline Shutdown Sequences ---
+    def record_frame_cycle(self):
+        if not self.is_recording:
+            return
+
+        # Check for time-based completion bounds
+        if (time.time() - self.recording_start_time) >= self.max_duration:
+            self.finalize_and_save_data()
+            return
+
+        is_sim = self.var_sim_mode.get()
+        if is_sim:
+            frame = np.zeros((480, 640, 3), dtype=np.uint8)
+            ret = True
+        else:
+            ret, frame = self.cap.read()
+
+        if not ret:
+            self.finalize_and_save_data()
+            return
+
+        now_time = time.time()
+        ts = datetime.datetime.fromtimestamp(now_time).isoformat(timespec='microseconds')
+        
+        self.video_writer.write(frame)
+        self.video_sync.append({"frame": self.frame_idx, "sys_ts": ts, "unix_ts": now_time})
+        
+        if self.radar_data:
+            last_pkt = self.radar_data[-1]
+            pts = last_pkt.get("num_detected_pts", 0)
+            trks = last_pkt.get("num_detected_tracks", 0)
+            cv2.putText(frame, f"Pts: {pts} | Tracks: {trks}", (15, 90), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        mode_prefix = "[SIMULATION]" if is_sim else "[LIVE]"
+        cv2.putText(frame, f"{mode_prefix} Frame: {self.frame_idx} | {ts.split('T')[1]}", (15, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        cv2.putText(frame, f"Activity: {self.activity_slug}", (15, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+        
+        # Safe on Mac because this function executes entirely on the Main Thread loop
+        cv2.imshow("Live Telemetry Sync Frame Target", frame)
+        cv2.waitKey(1)
+        
+        self.frame_idx += 1
+        
+        # Request next execution frame step in ~45-50ms (Targets roughly 20-22 FPS cadence bounds)
+        self.root.after(45, self.record_frame_cycle)
+
+    def finalize_and_save_data(self):
+        self.is_recording = False
+        self.btn_stop.config(state="disabled")
+        
         self.stop_event.set()
-        radar_thread.join(timeout=1.0)
-        if cap: cap.release()
-        out.release()
+        if self.radar_thread:
+            self.radar_thread.join(timeout=1.0)
+        if self.cap:
+            self.cap.release()
+        if self.video_writer:
+            self.video_writer.release()
+            
         cv2.destroyAllWindows()
         
-        with open(radar_output_path, 'w') as f:
+        with open(self.radar_output_path, 'w') as f:
             json.dump(self.radar_data, f)
             
-        pd.DataFrame(self.video_sync).to_csv(sync_output_path, index=False)
+        pd.DataFrame(self.video_sync).to_csv(self.sync_output_path, index=False)
         
-        self.lbl_status.config(text=f"✅ Saved Run {run_idx:02d} to {person_id} folder!", foreground="green")
-        messagebox.showinfo("Pipeline Complete", f"Data records successfully saved inside folder:\n{person_id}")
-        
-        self.is_recording = False
+        self.lbl_status.config(text=f"✅ Saved output run files successfully inside {self.person_id} structure!", foreground="green")
+        messagebox.showinfo("Pipeline Complete", f"Data records safely committed to directory slot:\n{self.person_id}")
         self.btn_start.config(state="normal")
-        self.btn_stop.config(state="disabled")
 
 if __name__ == "__main__":
     root = tk.Tk()
