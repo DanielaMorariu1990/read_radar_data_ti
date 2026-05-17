@@ -1,8 +1,8 @@
 import serial
 import csv
 # Import the actual TI Toolbox functions
-from parseFrame import *
-from gui_parser import *
+from common.parseFrame import *
+from common.gui_parser import *
 import pickle
 import datetime
 from write_to_db import save_raw_ti_data
