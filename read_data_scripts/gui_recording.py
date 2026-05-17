@@ -1,6 +1,17 @@
+# /// script
+# dependencies = [
+#   "opencv-python",
+#   "pyserial",
+#   "pandas",
+#   "numpy",
+#   "json-fix"
+# ]
+# ///
+
 import os
 import cv2
 import json
+import sys
 import time
 import serial
 import threading
@@ -10,13 +21,23 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import pandas as pd
 
+current_dir = os.path.dirname(os.path.abspath(__file__)) # inside read_data
+parent_dir = os.path.dirname(current_dir)                # inside read_radar_data_ti
+common_dir_path = os.path.join(parent_dir, 'common')     # path to common/
+
+# 2. Add 'common' to the Python search path
+if common_dir_path not in sys.path:
+    sys.path.append(common_dir_path)
+
 # --- RADAR PARSER FALLBACKS ---
-try:
-    from parseFrame import UARTParser
-except ImportError:
-    class UARTParser:
-        def __init__(self, type): self.dataCom = None
-        def readAndParseUartDoubleCOMPort(self): return {"pointCloud": np.array([]), "numDetectedTracks": 0}
+#try:
+
+from parseFrame import *
+from gui_parser import *
+# except ImportError:
+#     class UARTParser:
+#         def __init__(self, type): self.dataCom = None
+#         def readAndParseUartDoubleCOMPort(self): return {"pointCloud": np.array([]), "numDetectedTracks": 0}
 
 class RadarDataCollectorGUI:
     def __init__(self, root):
