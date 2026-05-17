@@ -248,20 +248,19 @@ class RadarDataCollectorGUI:
                             if isinstance(val, np.ndarray):
                                 return val.tolist()
                             return val if val is not None else []
+                        
+                        reconstructed_pc = np.column_stack((pc_x, pc_y, pc_z, pc_doppler, pc_snr))
 
                         formatted_packet = {
                             "time": now_iso,
                             "unix_ts": now_time,  
-                            "num_detected_pts": int(ti_output.get('numDetectedPoints', 0)),
-                            "num_detected_tracks": int(num_tracks),
-                            "track_data": clean_nested_structures(ti_output.get('trackData')),
-                            "height_data": clean_nested_structures(ti_output.get('heightData')),
-                            "track_indexes": clean_nested_structures(ti_output.get('trackIndexes')),
-                            "pc_x": pc_x,
-                            "pc_y": pc_y,
-                            "pc_z": pc_z,
-                            "pc_doppler": pc_doppler,
-                            "pc_snr": pc_snr
+                            "numDetectedPoints": int(ti_output.get('numDetectedPoints', 0)),
+                            "numDetectedTracks": int(num_tracks),
+                            "trackData": clean_nested_structures(ti_output.get('trackData')),
+                            "heightData": clean_nested_structures(ti_output.get('heightData')),
+                            "trackIndexes": clean_nested_structures(ti_output.get('trackIndexes')),
+                            "pointCloud": reconstructed_pc,
+                         
                         }
                         self.radar_data.append(formatted_packet)
         except Exception as e:
