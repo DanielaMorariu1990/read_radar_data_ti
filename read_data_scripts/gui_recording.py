@@ -48,11 +48,11 @@ class RadarDataCollectorGUI:
         self.stop_event = threading.Event()
         self.radar_data = []
         self.video_sync = []
-        self.frame_buffer = []  # RAM buffer to store raw frames safely during the active run
         self.is_recording = False
-        
+
         # Hardware tracking variables
         self.cap = None
+        self.video_writer = None
         self.radar_thread = None
         self.recording_start_time = 0
         self.frame_idx = 0
@@ -367,9 +367,25 @@ class RadarDataCollectorGUI:
             self.cap.set(cv2.CAP_PROP_FPS, 30)
 
             # Standardize color matrices
-            self.cap.set(cv2.CAP_PROP_BRIGHTNESS, 128)  
-            self.cap.set(cv2.CAP_PROP_CONTRAST, 128)    
-            self.cap.set(cv2.CAP_PROP_SHARPNESS, 180)   
+            self.cap.set(cv2.CAP_PROP_BRIGHTNESS, 128)
+            self.cap.set(cv2.CAP_PROP_CONTRAST, 128)
+            self.cap.set(cv2.CAP_PROP_SHARPNESS, 180)
+
+            # Get actual dimensions from camera
+            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        else:
+            self.cap = None
+            width, height = 640, 480
+
+        # Initialize video writer with fixed 20 FPS to match recording cadence
+        # Note: root.after(45ms) targets ~22 FPS, but processing overhead makes actual rate ~20 FPS
+        self.video_writer = cv2.VideoWriter(
+            self.video_output_path,
+            cv2.VideoWriter_fourcc(*'mp4v'),
+            20.0,
+            (width, height)
+        )
 
         # Clear storage buffers completely before beginning
         self.radar_data.clear()
@@ -410,9 +426,9 @@ class RadarDataCollectorGUI:
 
         now_time = time.time()
         ts = datetime.datetime.fromtimestamp(now_time).isoformat(timespec='microseconds')
-        
-        # Buffer the raw image array directly in RAM instead of disk writing inside the loop
-        self.frame_buffer.append(frame.copy())
+
+        # Write frame directly to video file
+        self.video_writer.write(frame)
         self.video_sync.append({"frame": self.frame_idx, "sys_ts": ts, "unix_ts": now_time})
         
         if self.radar_data:
@@ -435,70 +451,31 @@ class RadarDataCollectorGUI:
         self.root.after(45, self.record_frame_cycle)
 
     def finalize_and_save_data(self):
-        """Processes and saves data with dynamic FPS calculations."""
         self.is_recording = False
         self.btn_stop.config(state="disabled")
-        self.lbl_status.config(text="⏳ Processing memory logs & compiling stable MP4 container...", foreground="purple")
+        self.lbl_status.config(text="⏳ Saving data...", foreground="purple")
         self.root.update()
-        
+
         self.stop_event.set()
         if self.radar_thread:
             self.radar_thread.join(timeout=1.0)
         if self.cap:
             self.cap.release()
-            
+        if self.video_writer:
+            self.video_writer.release()
+
         cv2.destroyAllWindows()
-        
-        # =================================================================
-        # 🔥 THE DYNAMIC FPS ENGINE
-        # =================================================================
-        if len(self.video_sync) > 1 and len(self.frame_buffer) > 0:
-            total_frames = len(self.video_sync)
-            elapsed_seconds = self.video_sync[-1]["unix_ts"] - self.video_sync[0]["unix_ts"]
-            
-            # Avoid divide by zero if run was instantly cut short
-            if elapsed_seconds <= 0:
-                elapsed_seconds = 0.1
-                
-            # Compute exactly how fast your computer ran the recording loop
-            calculated_fps = round(total_frames / elapsed_seconds, 2)
-            if calculated_fps < 1.0: 
-                calculated_fps = 20.0
-                
-            print(f"📊 Compiling container at native runtime velocity: {calculated_fps} FPS")
-            
-            # Grab target resolution matching the real buffered arrays
-            sample_frame = self.frame_buffer[0]
-            height_frame, width_frame = sample_frame.shape[0], sample_frame.shape[1]
-            
-            # Initialize container matching computed hardware timing exactly
-            video_writer = cv2.VideoWriter(
-                self.video_output_path, 
-                cv2.VideoWriter_fourcc(*'mp4v'), 
-                calculated_fps, 
-                (width_frame, height_frame)
-            )
-            
-            # Flush buffered frames out to memory disk storage
-            for saved_frame in self.frame_buffer:
-                video_writer.write(saved_frame)
-            video_writer.release()
-        else:
-            print("⚠️ Video generation failed: Missing sequential tracking data blocks.")
-        
-        # Clear out ram structures safely
-        self.frame_buffer.clear()
-        
+
         # Save radar packages
         with open(self.radar_output_path, 'w') as f:
             json.dump(self.radar_data, f)
-            
+
         # Save synchronization indexes
         pd.DataFrame(self.video_sync).to_csv(self.sync_output_path, index=False)
-        
+
         self.lbl_status.config(text=f"✅ Saved run successfully inside {self.person_id} structural block!", foreground="green")
         messagebox.showinfo("Pipeline Complete", f"Data records safely saved under the persistent ID slot:\n{self.person_id}")
-        
+
         self.btn_start.config(state="normal")
         self.btn_new_person.config(state="normal") 
 
