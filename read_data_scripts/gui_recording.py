@@ -48,6 +48,7 @@ class RadarDataCollectorGUI:
         self.stop_event = threading.Event()
         self.radar_data = []
         self.video_sync = []
+        self.frame_buffer = []
         self.is_recording = False
 
         # Hardware tracking variables
@@ -62,6 +63,8 @@ class RadarDataCollectorGUI:
         # Persistent Subject Folder Parameters
         self.person_id = ""
         self.person_dir = ""
+        self.is_existing_person = False
+        self.person_display_names = {}
         
         # Paths for current run
         self.video_output_path = ""
@@ -142,12 +145,17 @@ class RadarDataCollectorGUI:
         self.spin_weight.set(70)
         self.spin_weight.grid(row=2, column=1, padx=5, sticky="w")
 
-        ttk.Label(lbl_frame_sub, text="Active Subject ID:").grid(row=3, column=0, sticky="w", pady=8)
+        ttk.Label(lbl_frame_sub, text="Select Person:").grid(row=3, column=0, sticky="w", pady=3)
+        self.combo_person = ttk.Combobox(lbl_frame_sub, state="readonly", width=12)
+        self.combo_person.grid(row=3, column=1, padx=5, sticky="w")
+        self.combo_person.bind("<<ComboboxSelected>>", self.on_person_selected)
+
+        ttk.Label(lbl_frame_sub, text="Active Subject ID:").grid(row=4, column=0, sticky="w", pady=8)
         self.lbl_current_person = ttk.Label(lbl_frame_sub, text="Scanning...", font=("Helvetica", 10, "bold"), foreground="green")
-        self.lbl_current_person.grid(row=3, column=1, padx=5, sticky="w")
-        
+        self.lbl_current_person.grid(row=4, column=1, padx=5, sticky="w")
+
         self.btn_new_person = ttk.Button(lbl_frame_sub, text="🆕 Next Person", command=self.manual_next_person)
-        self.btn_new_person.grid(row=3, column=2, padx=5, sticky="w")
+        self.btn_new_person.grid(row=4, column=2, padx=5, sticky="w")
 
         # 4. Task Parameters
         lbl_frame_task = ttk.LabelFrame(self.root, text=" 4. Task Parameters ", padding=10)
@@ -194,11 +202,17 @@ class RadarDataCollectorGUI:
             self.entry_root_dir.insert(0, selected)
             self.person_dir, self.person_id = self.get_next_person_dir(selected)
             self.lbl_current_person.config(text=self.person_id)
+            self.is_existing_person = False
+            self.set_metadata_readonly(False)
+            self.combo_person.set("")
+            self.refresh_person_dropdown()
 
     def initialize_person(self):
         base_dir = self.entry_root_dir.get()
         self.person_dir, self.person_id = self.get_next_person_dir(base_dir)
         self.lbl_current_person.config(text=self.person_id)
+        self.is_existing_person = False
+        self.refresh_person_dropdown()
 
     def manual_next_person(self):
         base_dir = self.entry_root_dir.get()
@@ -216,6 +230,10 @@ class RadarDataCollectorGUI:
                 break
             i += 1
         self.lbl_current_person.config(text=self.person_id)
+        self.is_existing_person = False
+        self.set_metadata_readonly(False)
+        self.combo_person.set("")
+        self.refresh_person_dropdown()
         messagebox.showinfo("Subject Advanced", f"Switched to a clean execution environment slot: {self.person_id}")
 
     def get_next_person_dir(self, root_dir):
@@ -230,6 +248,80 @@ class RadarDataCollectorGUI:
             elif len(os.listdir(candidate_path)) == 0:
                 return candidate_path, f"person{i}"
             i += 1
+
+    def scan_existing_persons(self, root_dir):
+        if not os.path.exists(root_dir):
+            return []
+        persons = []
+        i = 1
+        while True:
+            person_folder = os.path.join(root_dir, f"person{i}")
+            if not os.path.exists(person_folder):
+                break
+            json_path = os.path.join(person_folder, f"person{i}.json")
+            if os.path.exists(json_path):
+                try:
+                    metadata = self.load_person_metadata(person_folder)
+                    if metadata:
+                        age = metadata.get("age_years", "?")
+                        height = metadata.get("height_cm", "?")
+                        display_name = f"person{i} ({age}y, {height}cm)"
+                        persons.append((f"person{i}", display_name))
+                except Exception:
+                    pass
+            i += 1
+        return persons
+
+    def load_person_metadata(self, person_dir):
+        person_id = os.path.basename(person_dir)
+        json_path = os.path.join(person_dir, f"{person_id}.json")
+        if not os.path.exists(json_path):
+            return None
+        try:
+            with open(json_path, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def on_person_selected(self, event):
+        selection = self.combo_person.get()
+        if not selection:
+            return
+        person_id = self.person_display_names.get(selection)
+        if not person_id:
+            return
+        root_dir = self.entry_root_dir.get()
+        person_dir = os.path.join(root_dir, person_id)
+        metadata = self.load_person_metadata(person_dir)
+        if metadata:
+            self.spin_age.set(metadata.get("age_years", 25))
+            self.spin_height.set(metadata.get("height_cm", 175))
+            self.spin_weight.set(metadata.get("weight_kg", 70))
+            self.person_dir = person_dir
+            self.person_id = person_id
+            self.lbl_current_person.config(text=person_id)
+            self.is_existing_person = True
+            self.set_metadata_readonly(True)
+
+    def set_metadata_readonly(self, readonly):
+        state = "disabled" if readonly else "normal"
+        self.spin_age.config(state=state)
+        self.spin_height.config(state=state)
+        self.spin_weight.config(state=state)
+
+    def refresh_person_dropdown(self):
+        root_dir = self.entry_root_dir.get()
+        persons = self.scan_existing_persons(root_dir)
+        self.person_display_names = {display_name: person_id for person_id, display_name in persons}
+        display_names = [display_name for _, display_name in persons]
+        self.combo_person['values'] = display_names
+        if self.is_existing_person and self.person_id:
+            for display_name, person_id in self.person_display_names.items():
+                if person_id == self.person_id:
+                    self.combo_person.set(display_name)
+                    break
+        else:
+            self.combo_person.set("")
 
     def calculate_next_run_idx(self, person_dir, activity_slug):
         existing_files = os.listdir(person_dir)
@@ -336,12 +428,13 @@ class RadarDataCollectorGUI:
             self.person_dir, self.person_id = self.get_next_person_dir(base_dir)
         
         self.lbl_current_person.config(text=self.person_id)
-        
-        json_meta_path = os.path.join(self.person_dir, f"{self.person_id}.json")
-        if not os.path.exists(json_meta_path):
-            meta_payload = {"subject_id": self.person_id, "age_years": int(age), "height_cm": int(height), "weight_kg": int(weight)}
-            with open(json_meta_path, 'w') as f:
-                json.dump(meta_payload, f, indent=4)
+
+        if not self.is_existing_person:
+            json_meta_path = os.path.join(self.person_dir, f"{self.person_id}.json")
+            if not os.path.exists(json_meta_path):
+                meta_payload = {"subject_id": self.person_id, "age_years": int(age), "height_cm": int(height), "weight_kg": int(weight)}
+                with open(json_meta_path, 'w') as f:
+                    json.dump(meta_payload, f, indent=4)
 
         run_idx = self.calculate_next_run_idx(self.person_dir, self.activity_slug)
         
