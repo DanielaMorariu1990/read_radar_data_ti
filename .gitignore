@@ -205,3 +205,14 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+person2/
+person2_out/
+person2_mini/
+person5/
+person5_out/
+person*/
+b2b_sales_docu.html
+.gitignore
+analyse_video/yolov8n-pose.pt
+yolov8n-pose.pt

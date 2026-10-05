@@ -1,0 +1,19 @@
+[project]
+name = "read-radar-data-ti"
+version = "0.1.0"
+description = "TI IWR6843AOP UART serial stream parser and TLV reader"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0",
+    "pyserial>=3.5",
+]
+
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["common"]
+[tool.setuptools.package-dir]
+"common" = "common"
