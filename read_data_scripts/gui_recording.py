@@ -11,7 +11,11 @@
 import os
 import cv2
 import json
-import json_fix
+try:
+    import json_fix  # noqa: F401
+except ImportError:
+    json_fix = None
+import logging
 import sys
 import time
 import serial
@@ -22,13 +26,54 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import pandas as pd
 
+logger = logging.getLogger(__name__)
+
 current_dir = os.path.dirname(os.path.abspath(__file__)) # inside read_data
 parent_dir = os.path.dirname(current_dir)                # inside read_radar_data_ti
 common_dir_path = os.path.join(parent_dir, 'common')     # path to common/
+rfm_root = os.path.join(os.path.dirname(parent_dir), 'radar-fall-modeling')
 
-# 2. Add 'common' to the Python search path
+# 2. Add 'common' (and sibling radar-fall-modeling for canonical pose_from_cfg) to sys.path
 if common_dir_path not in sys.path:
     sys.path.append(common_dir_path)
+if os.path.isdir(rfm_root) and rfm_root not in sys.path:
+    sys.path.append(rfm_root)
+
+
+def _pose_dict_from_cfg(cfg_text):
+    try:
+        from preprocessing.sensor_pose import pose_from_cfg
+    except ImportError:
+        logger.warning("preprocessing.sensor_pose unavailable; cannot parse pose_from_cfg")
+        return None
+    pose = pose_from_cfg(cfg_text)
+    return {
+        "height_m": float(pose.height_m),
+        "elev_tilt_deg": float(pose.elev_tilt_deg),
+        "az_tilt_deg": float(pose.az_tilt_deg),
+        "source": str(pose.source),
+        "confidence": float(pose.confidence),
+        "n_samples": int(pose.n_samples),
+    }
+
+
+def build_radar_recording_payload(frames, cfg_text=None):
+    """Wrap recorded frames with a header containing the exact radar cfg text and parsed `pose_from_cfg`."""
+    cleaned = cfg_text.strip() if isinstance(cfg_text, str) and cfg_text.strip() else None
+    if cleaned is None:
+        logger.warning("Radar cfg text is missing when saving recording; pose_from_cfg will be None")
+        return {
+            "header": {"format_version": 1, "cfg_text": None, "pose_from_cfg": None},
+            "frames": list(frames),
+        }
+    return {
+        "header": {
+            "format_version": 1,
+            "cfg_text": cfg_text,
+            "pose_from_cfg": _pose_dict_from_cfg(cleaned),
+        },
+        "frames": list(frames),
+    }
 
 # --- RADAR PARSER FALLBACKS ---
 try:
@@ -50,6 +95,7 @@ class RadarDataCollectorGUI:
         self.video_sync = []
         self.frame_buffer = []
         self.is_recording = False
+        self.active_cfg_text = None
 
         # Hardware tracking variables
         self.cap = None
@@ -122,9 +168,17 @@ class RadarDataCollectorGUI:
         self.entry_com.insert(0, "COM5")
         self.entry_com.grid(row=1, column=1, sticky="w", padx=5)
 
+        ttk.Label(lbl_frame_hw, text="Radar CFG File:").grid(row=2, column=0, sticky="w", pady=5)
+        self.entry_cfg = ttk.Entry(lbl_frame_hw, width=32)
+        default_cfg = os.path.join(current_dir, "AOP_6m_staticRetention.cfg")
+        if os.path.exists(default_cfg):
+            self.entry_cfg.insert(0, default_cfg)
+        self.entry_cfg.grid(row=2, column=1, sticky="w", padx=5)
+        ttk.Button(lbl_frame_hw, text="Browse", command=self.browse_cfg).grid(row=2, column=2, padx=5)
+
         self.var_sim_mode = tk.BooleanVar(value=False)
         self.chk_sim = ttk.Checkbutton(lbl_frame_hw, text="Enable Hardware Simulation Mode", variable=self.var_sim_mode)
-        self.chk_sim.grid(row=2, column=0, columnspan=2, sticky="w", pady=5)
+        self.chk_sim.grid(row=3, column=0, columnspan=2, sticky="w", pady=5)
 
         # 3. Participant Demographics
         lbl_frame_sub = ttk.LabelFrame(self.root, text=" 3. Participant Demographics ", padding=10)
@@ -194,6 +248,19 @@ class RadarDataCollectorGUI:
                 valid_indices.append(str(i))
                 cap.release()
         return valid_indices if valid_indices else ["0"]
+
+    def browse_cfg(self):
+        selected = filedialog.askopenfilename(filetypes=[("Radar CFG", "*.cfg"), ("All files", "*.*")])
+        if selected:
+            self.entry_cfg.delete(0, tk.END)
+            self.entry_cfg.insert(0, selected)
+
+    def _read_cfg_text(self):
+        cfg_path = self.entry_cfg.get().strip() if hasattr(self, "entry_cfg") else ""
+        if cfg_path and os.path.exists(cfg_path):
+            with open(cfg_path, "r") as f:
+                return f.read()
+        return self.active_cfg_text
 
     def browse_directory(self):
         selected = filedialog.askdirectory()
@@ -559,9 +626,10 @@ class RadarDataCollectorGUI:
 
         cv2.destroyAllWindows()
 
-        # Save radar packages
+        # Save radar packages with cfg header + parsed pose_from_cfg
+        payload = build_radar_recording_payload(self.radar_data, cfg_text=self._read_cfg_text())
         with open(self.radar_output_path, 'w') as f:
-            json.dump(self.radar_data, f)
+            json.dump(payload, f)
 
         # Save synchronization indexes
         pd.DataFrame(self.video_sync).to_csv(self.sync_output_path, index=False)
